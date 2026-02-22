@@ -26,6 +26,7 @@ namespace Attendance_Monitoring_System
             if (e.KeyCode == Keys.Enter)
             {
                 string rawCode = txtScan.Text.Trim();
+                txtTime.Text = DateTime.Now.ToString("hh:mm:ss tt");
 
                 if (rawCode.Length != 10)
                 {
@@ -34,10 +35,11 @@ namespace Attendance_Monitoring_System
                     return;
                 }
 
-
+                
                 await SendScan(rawCode);
                 await LoadAttendance();
 
+                txtTime.Clear();
                 txtScan.Clear();
             }
         }

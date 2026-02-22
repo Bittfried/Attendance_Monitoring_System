@@ -85,6 +85,7 @@ namespace Attendance_Monitoring_System
                 this.Invoke(new Action(async () =>
                 {
                     lblStatus.Text = "Scanned: " + result.Text;
+                    txtTime.Text = DateTime.Now.ToString("hh:mm:ss tt");
 
                     await SendScan(result.Text);
                     await LoadAttendance();
@@ -140,6 +141,8 @@ namespace Attendance_Monitoring_System
             {
                 camera.SignalToStop();
                 camera.WaitForStop();
+                lblStatus.Text = "";
+                txtTime.Clear();
             }
         }
         protected override void OnFormClosing(FormClosingEventArgs e)

@@ -34,6 +34,7 @@
             this.gridAttendance = new System.Windows.Forms.DataGridView();
             this.lblStatus = new System.Windows.Forms.Label();
             this.label1 = new System.Windows.Forms.Label();
+            this.txtTime = new System.Windows.Forms.TextBox();
             ((System.ComponentModel.ISupportInitialize)(this.cameraBox)).BeginInit();
             ((System.ComponentModel.ISupportInitialize)(this.gridAttendance)).BeginInit();
             this.SuspendLayout();
@@ -49,7 +50,7 @@
             // 
             // btnStart
             // 
-            this.btnStart.Location = new System.Drawing.Point(412, 328);
+            this.btnStart.Location = new System.Drawing.Point(412, 337);
             this.btnStart.Name = "btnStart";
             this.btnStart.Size = new System.Drawing.Size(75, 23);
             this.btnStart.TabIndex = 1;
@@ -59,7 +60,7 @@
             // 
             // btnEnd
             // 
-            this.btnEnd.Location = new System.Drawing.Point(603, 328);
+            this.btnEnd.Location = new System.Drawing.Point(603, 337);
             this.btnEnd.Name = "btnEnd";
             this.btnEnd.Size = new System.Drawing.Size(75, 23);
             this.btnEnd.TabIndex = 2;
@@ -79,10 +80,11 @@
             // lblStatus
             // 
             this.lblStatus.AutoSize = true;
-            this.lblStatus.Location = new System.Drawing.Point(506, 110);
+            this.lblStatus.Location = new System.Drawing.Point(546, 233);
             this.lblStatus.Name = "lblStatus";
             this.lblStatus.Size = new System.Drawing.Size(0, 13);
             this.lblStatus.TabIndex = 4;
+            this.lblStatus.TextAlign = System.Drawing.ContentAlignment.TopCenter;
             // 
             // label1
             // 
@@ -94,11 +96,21 @@
             this.label1.TabIndex = 5;
             this.label1.Text = "Camera Scanner";
             // 
+            // txtTime
+            // 
+            this.txtTime.Enabled = false;
+            this.txtTime.Location = new System.Drawing.Point(492, 299);
+            this.txtTime.Name = "txtTime";
+            this.txtTime.Size = new System.Drawing.Size(109, 20);
+            this.txtTime.TabIndex = 6;
+            this.txtTime.TextAlign = System.Windows.Forms.HorizontalAlignment.Center;
+            // 
             // Camera_Attendace
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.ClientSize = new System.Drawing.Size(749, 450);
+            this.Controls.Add(this.txtTime);
             this.Controls.Add(this.label1);
             this.Controls.Add(this.lblStatus);
             this.Controls.Add(this.gridAttendance);
@@ -124,5 +136,6 @@
         private System.Windows.Forms.DataGridView gridAttendance;
         private System.Windows.Forms.Label lblStatus;
         private System.Windows.Forms.Label label1;
+        private System.Windows.Forms.TextBox txtTime;
     }
 }
