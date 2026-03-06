@@ -1,12 +1,10 @@
 ﻿using Newtonsoft.Json;
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using ClosedXML.Excel;
-using System.IO;
-
 
 namespace Attendance_Monitoring_System
 {
@@ -15,71 +13,92 @@ namespace Attendance_Monitoring_System
         string supabaseUrl = "https://klydsxazcmxavgqvxrjv.supabase.co";
         string supabaseKey = "sb_publishable_By0K2pvbnVBRQ8tp_Ny-dg_qCExPABw";
 
+        private static readonly HttpClient client = new HttpClient();
+
         public Scanner_Attendance()
         {
             InitializeComponent();
+
+            if (!client.DefaultRequestHeaders.Contains("apikey"))
+                client.DefaultRequestHeaders.Add("apikey", supabaseKey);
+
+            if (!client.DefaultRequestHeaders.Contains("Authorization"))
+                client.DefaultRequestHeaders.Add("Authorization", $"Bearer {supabaseKey}");
+
+            this.Load += Form1_Load;
+
             txtScan.Focus();
         }
 
         private async void txtScan_KeyDown(object sender, KeyEventArgs e)
         {
-            if (e.KeyCode == Keys.Enter)
+            if (e.KeyCode != Keys.Enter)
+                return;
+
+            e.SuppressKeyPress = true;
+
+            string rawCode = txtScan.Text.Trim();
+
+            txtTime.Text = DateTime.Now.ToString("hh:mm:ss tt");
+
+            if (rawCode.Length != 10)
             {
-                string rawCode = txtScan.Text.Trim();
-                txtTime.Text = DateTime.Now.ToString("hh:mm:ss tt");
+                MessageBox.Show("Warning: scanned code is wrong", "Input Rejected");
+                txtScan.Clear();
+                txtScan.Focus();
+                return;
+            }
 
-                if (rawCode.Length != 10)
-                {
-                    MessageBox.Show("warning, scanned code is wrong", "input rejected");
-                    txtScan.Clear();
-                    return;
-                }
-
-                
+            try
+            {
                 await SendScan(rawCode);
                 await LoadAttendance();
-
-                txtTime.Clear();
-                txtScan.Clear();
             }
+            catch
+            {
+                MessageBox.Show("Network error while sending attendance.");
+            }
+
+            txtTime.Clear();
+            txtScan.Clear();
+            txtScan.Focus();
         }
 
         async Task SendScan(string rawCode)
         {
-            using (var client = new HttpClient())
+            var content = new StringContent(
+                JsonConvert.SerializeObject(new { raw_code = rawCode }),
+                Encoding.UTF8,
+                "application/json"
+            );
+
+            var response = await client.PostAsync(
+                $"{supabaseUrl}/rest/v1/rpc/log_attendance",
+                content
+            );
+
+            if (!response.IsSuccessStatusCode)
             {
-                client.DefaultRequestHeaders.Add("apikey", supabaseKey);
-                client.DefaultRequestHeaders.Add("Authorization", $"Bearer {supabaseKey}");
-
-                var content = new StringContent(
-                    JsonConvert.SerializeObject(new { raw_code = rawCode }),
-                    Encoding.UTF8,
-                    "application/json"
-                );
-
-                await client.PostAsync(
-                    $"{supabaseUrl}/rest/v1/rpc/log_attendance",
-                    content
-                );
+                throw new Exception("Failed to log attendance.");
             }
         }
 
         async Task LoadAttendance()
         {
-            using (var client = new HttpClient())
+            try
             {
-                client.DefaultRequestHeaders.Add("apikey", supabaseKey);
-                client.DefaultRequestHeaders.Add("Authorization", $"Bearer {supabaseKey}");
-
                 var response = await client.GetStringAsync(
                     $"{supabaseUrl}/rest/v1/attendance_today_view"
                 );
 
-                var data = JsonConvert.DeserializeObject(response);
+                var data = JsonConvert.DeserializeObject<List<Attendance>>(response);
 
                 gridAttendance.DataSource = data;
                 gridAttendance.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-                ExportToExcel(data);
+            }
+            catch
+            {
+                MessageBox.Show("Failed to load attendance.");
             }
         }
 
@@ -88,54 +107,12 @@ namespace Attendance_Monitoring_System
             await LoadAttendance();
         }
 
-        void ExportToExcel(dynamic data)
-        {
-            string folder = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-                "AttendanceLogs"
-            );
-
-            if (!Directory.Exists(folder))
-                Directory.CreateDirectory(folder);
-
-            string filePath = Path.Combine(
-                folder,
-                $"Attendance_{DateTime.Now:yyyy-MM-dd}.xlsx"
-            );
-
-            using (var workbook = new XLWorkbook())
-            {
-                var sheet = workbook.Worksheets.Add("Attendance");
-
-                // headers
-                sheet.Cell(1, 1).Value = "First Name";
-                sheet.Cell(1, 2).Value = "Last Name";
-                sheet.Cell(1, 3).Value = "Time In";
-                sheet.Cell(1, 4).Value = "Time Out";
-
-                int row = 2;
-
-                foreach (var item in data)
-                {
-                    sheet.Cell(row, 1).Value = item.first_name;
-                    sheet.Cell(row, 2).Value = item.last_name;
-                    sheet.Cell(row, 3).Value = item.time_in;
-                    sheet.Cell(row, 4).Value = item.time_out;
-                    row++;
-                }
-
-                sheet.Columns().AdjustToContents();
-
-                workbook.SaveAs(filePath);
-            }
-        }
-
         private void Scanner_Attendance_FormClosing(object sender, FormClosingEventArgs e)
         {
             Menu menu = new Menu();
             menu.Show();
         }
-
-
     }
+
+
 }

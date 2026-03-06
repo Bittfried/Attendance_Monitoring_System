@@ -3,20 +3,12 @@ using AForge.Video.DirectShow;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
 using System.Drawing;
-using System.Drawing;
-using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
-using System.Web;
 using System.Windows.Forms;
 using ZXing;
-using ClosedXML.Excel;
-using System.IO;
-
 
 namespace Attendance_Monitoring_System
 {
@@ -25,13 +17,24 @@ namespace Attendance_Monitoring_System
         string supabaseUrl = "https://klydsxazcmxavgqvxrjv.supabase.co";
         string supabaseKey = "sb_publishable_By0K2pvbnVBRQ8tp_Ny-dg_qCExPABw";
 
+        private static readonly HttpClient client = new HttpClient();
+
         FilterInfoCollection cameras;
         VideoCaptureDevice camera;
+
         bool processing = false;
+
+        Dictionary<string, DateTime> lastScan = new Dictionary<string, DateTime>();
 
         public Camera_Attendace()
         {
             InitializeComponent();
+
+            if (!client.DefaultRequestHeaders.Contains("apikey"))
+                client.DefaultRequestHeaders.Add("apikey", supabaseKey);
+
+            if (!client.DefaultRequestHeaders.Contains("Authorization"))
+                client.DefaultRequestHeaders.Add("Authorization", $"Bearer {supabaseKey}");
         }
 
         private async void Camera_Attendance_Load(object sender, EventArgs e)
@@ -54,7 +57,6 @@ namespace Attendance_Monitoring_System
             camera.Start();
 
             lblStatus.Text = "Camera started";
-
         }
 
         private void btnEnd_Click(object sender, EventArgs e)
@@ -70,40 +72,99 @@ namespace Attendance_Monitoring_System
 
         private void Camera_NewFrame(object sender, NewFrameEventArgs eventArgs)
         {
-            Bitmap bitmap = (Bitmap)eventArgs.Frame.Clone();
-            cameraBox.Image = bitmap;
+            Bitmap frame = (Bitmap)eventArgs.Frame.Clone();
+            Bitmap decodeBitmap = (Bitmap)frame.Clone();
 
-            if (processing) return;
-
-            BarcodeReader reader = new BarcodeReader();
-            var result = reader.Decode(bitmap);
-
-            if (result != null && result.Text.Length == 10)
+            if (this.IsHandleCreated && !this.IsDisposed)
             {
-                processing = true;
-
-                this.Invoke(new Action(async () =>
+                try
                 {
-                    lblStatus.Text = "Scanned: " + result.Text;
-                    txtTime.Text = DateTime.Now.ToString("hh:mm:ss tt");
-
-                    await SendScan(result.Text);
-                    await LoadAttendance();
-
-                    System.Media.SystemSounds.Beep.Play();
-
-                    await Task.Delay(2000);
-                    processing = false;
-                }));
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        var old = cameraBox.Image;
+                        cameraBox.Image = frame;
+                        old?.Dispose();
+                    }));
+                }
+                catch
+                {
+                    frame.Dispose();
+                }
             }
+            else
+            {
+                frame.Dispose();
+            }
+
+            lock (this)
+            {
+                if (processing)
+                {
+                    decodeBitmap.Dispose();
+                    return;
+                }
+                processing = true;
+            }
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    var reader = new BarcodeReader
+                    {
+                        AutoRotate = true,
+                        Options = { TryHarder = true }
+                    };
+
+                    var result = reader.Decode(decodeBitmap);
+
+                    if (result != null && result.Text.Length == 10)
+                    {
+                        if (lastScan.ContainsKey(result.Text))
+                        {
+                            if ((DateTime.Now - lastScan[result.Text]).TotalSeconds < 10)
+                            {
+                                processing = false;
+                                return;
+                            }
+                        }
+
+                        lastScan[result.Text] = DateTime.Now;
+
+                        this.BeginInvoke(new Action(async () =>
+                        {
+                            lblStatus.Text = "Scanned: " + result.Text;
+                            txtTime.Text = DateTime.Now.ToString("hh:mm:ss tt");
+
+                            await SendScan(result.Text);
+                            await LoadAttendance();
+
+                            System.Media.SystemSounds.Beep.Play();
+
+                            await Task.Delay(2000);
+                            processing = false;
+                        }));
+                    }
+                    else
+                    {
+                        processing = false;
+                    }
+                }
+                catch
+                {
+                    processing = false;
+                }
+                finally
+                {
+                    decodeBitmap.Dispose();
+                }
+            });
         }
+
         async Task SendScan(string rawCode)
         {
-            using (var client = new HttpClient())
+            try
             {
-                client.DefaultRequestHeaders.Add("apikey", supabaseKey);
-                client.DefaultRequestHeaders.Add("Authorization", $"Bearer {supabaseKey}");
-
                 var content = new StringContent(
                     JsonConvert.SerializeObject(new { raw_code = rawCode }),
                     Encoding.UTF8,
@@ -115,85 +176,47 @@ namespace Attendance_Monitoring_System
                     content
                 );
             }
+            catch
+            {
+                lblStatus.Text = "Network error";
+            }
         }
 
         async Task LoadAttendance()
         {
-            using (var client = new HttpClient())
+            try
             {
-                client.DefaultRequestHeaders.Add("apikey", supabaseKey);
-                client.DefaultRequestHeaders.Add("Authorization", $"Bearer {supabaseKey}");
-
                 var response = await client.GetStringAsync(
                     $"{supabaseUrl}/rest/v1/attendance_today_view"
                 );
 
-                var data = JsonConvert.DeserializeObject(response);
+                var data = JsonConvert.DeserializeObject<List<Attendance>>(response);
 
                 gridAttendance.DataSource = data;
                 gridAttendance.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-                ExportToExcel(data);
             }
-        }
-        void StopCamera()
-        {
-            if (camera != null && camera.IsRunning)
+            catch
             {
-                camera.SignalToStop();
-                camera.WaitForStop();
-                lblStatus.Text = "";
-                txtTime.Clear();
+                lblStatus.Text = "Failed to load attendance";
             }
         }
+
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (camera != null && camera.IsRunning)
-                camera.SignalToStop();
-
-            base.OnFormClosing(e);
-        }
-
-        void ExportToExcel(dynamic data)
-        {
-            string folder = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-                "AttendanceLogs"
-            );
-
-            if (!Directory.Exists(folder))
-                Directory.CreateDirectory(folder);
-
-            string filePath = Path.Combine(
-                folder,
-                $"Attendance_{DateTime.Now:yyyy-MM-dd}.xlsx"
-            );
-
-            using (var workbook = new XLWorkbook())
+            if (camera != null)
             {
-                var sheet = workbook.Worksheets.Add("Attendance");
+                camera.NewFrame -= Camera_NewFrame;
 
-                // headers
-                sheet.Cell(1, 1).Value = "First Name";
-                sheet.Cell(1, 2).Value = "Last Name";
-                sheet.Cell(1, 3).Value = "Time In";
-                sheet.Cell(1, 4).Value = "Time Out";
-
-                int row = 2;
-
-                foreach (var item in data)
+                if (camera.IsRunning)
                 {
-                    sheet.Cell(row, 1).Value = item.first_name;
-                    sheet.Cell(row, 2).Value = item.last_name;
-                    sheet.Cell(row, 3).Value = Convert.ToDateTime(item.time_in).ToString("hh:mm tt");
-                    sheet.Cell(row, 3).Value = Convert.ToDateTime(item.time_out).ToString("hh:mm tt");
-
-                    row++;
+                    camera.SignalToStop();
+                    camera.WaitForStop();
                 }
 
-                sheet.Columns().AdjustToContents();
-
-                workbook.SaveAs(filePath);
+                camera = null;
             }
+
+            base.OnFormClosing(e);
         }
 
         private void Camera_Attendace_FormClosing(object sender, FormClosingEventArgs e)
@@ -201,5 +224,13 @@ namespace Attendance_Monitoring_System
             Menu menu = new Menu();
             menu.Show();
         }
+    }
+
+    public class Attendance
+    {
+        public string first_name { get; set; }
+        public string last_name { get; set; }
+        public DateTime? time_in { get; set; }
+        public DateTime? time_out { get; set; }
     }
 }

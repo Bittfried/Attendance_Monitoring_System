@@ -121,6 +121,7 @@
             this.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
             this.Text = "Camera_Attendace";
             this.FormClosing += new System.Windows.Forms.FormClosingEventHandler(this.Camera_Attendace_FormClosing);
+            this.Load += new System.EventHandler(this.Camera_Attendance_Load);
             ((System.ComponentModel.ISupportInitialize)(this.cameraBox)).EndInit();
             ((System.ComponentModel.ISupportInitialize)(this.gridAttendance)).EndInit();
             this.ResumeLayout(false);
