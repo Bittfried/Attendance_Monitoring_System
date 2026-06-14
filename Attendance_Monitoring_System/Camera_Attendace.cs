@@ -1,11 +1,9 @@
-﻿using AForge.Video;
+using AForge.Video;
 using AForge.Video.DirectShow;
-using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Net.Http;
-using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using ZXing;
@@ -14,223 +12,334 @@ namespace Attendance_Monitoring_System
 {
     public partial class Camera_Attendace : Form
     {
-        string supabaseUrl = "https://klydsxazcmxavgqvxrjv.supabase.co";
-        string supabaseKey = "sb_publishable_By0K2pvbnVBRQ8tp_Ny-dg_qCExPABw";
+        private static readonly TimeSpan DuplicateScanWindow = TimeSpan.FromSeconds(10);
+        private static readonly TimeSpan MinimumDecodeInterval = TimeSpan.FromMilliseconds(250);
 
-        private static readonly HttpClient client = new HttpClient();
+        private readonly Dictionary<string, DateTime> lastSuccessfulScans =
+            new Dictionary<string, DateTime>(StringComparer.Ordinal);
 
-        FilterInfoCollection cameras;
-        VideoCaptureDevice camera;
-
-        bool processing = false;
-
-        Dictionary<string, DateTime> lastScan = new Dictionary<string, DateTime>();
+        private VideoCaptureDevice camera;
+        private int processing;
+        private long nextDecodeTicks;
+        private volatile bool closing;
 
         public Camera_Attendace()
         {
             InitializeComponent();
-
-            if (!client.DefaultRequestHeaders.Contains("apikey"))
-                client.DefaultRequestHeaders.Add("apikey", supabaseKey);
-
-            if (!client.DefaultRequestHeaders.Contains("Authorization"))
-                client.DefaultRequestHeaders.Add("Authorization", $"Bearer {supabaseKey}");
+            ConfigureAttendanceGrid();
+            btnEnd.Enabled = false;
         }
 
         private async void Camera_Attendance_Load(object sender, EventArgs e)
         {
-            await LoadAttendance();
+            try
+            {
+                await LoadAttendance();
+            }
+            catch
+            {
+                if (!closing)
+                {
+                    lblStatus.Text = "Failed to load attendance";
+                }
+            }
         }
 
         private void btnStart_Click(object sender, EventArgs e)
         {
-            cameras = new FilterInfoCollection(FilterCategory.VideoInputDevice);
-
-            if (cameras.Count == 0)
+            if (camera != null && camera.IsRunning)
             {
-                lblStatus.Text = "No camera found";
+                lblStatus.Text = "Camera is already running";
                 return;
             }
 
-            camera = new VideoCaptureDevice(cameras[0].MonikerString);
-            camera.NewFrame += Camera_NewFrame;
-            camera.Start();
+            try
+            {
+                StopCamera();
+                var cameras = new FilterInfoCollection(FilterCategory.VideoInputDevice);
 
-            lblStatus.Text = "Camera started";
+                if (cameras.Count == 0)
+                {
+                    lblStatus.Text = "No camera found";
+                    return;
+                }
+
+                camera = new VideoCaptureDevice(cameras[0].MonikerString);
+                camera.NewFrame += Camera_NewFrame;
+                camera.Start();
+
+                btnStart.Enabled = false;
+                btnEnd.Enabled = true;
+                lblStatus.Text = "Camera started";
+            }
+            catch
+            {
+                StopCamera();
+                lblStatus.Text = "Unable to start camera";
+            }
         }
 
         private void btnEnd_Click(object sender, EventArgs e)
         {
-            if (camera != null && camera.IsRunning)
-            {
-                camera.SignalToStop();
-                camera.WaitForStop();
-            }
-
+            StopCamera();
             lblStatus.Text = "Camera stopped";
         }
 
         private void Camera_NewFrame(object sender, NewFrameEventArgs eventArgs)
         {
-            Bitmap frame = (Bitmap)eventArgs.Frame.Clone();
-            Bitmap decodeBitmap = (Bitmap)frame.Clone();
-
-            if (this.IsHandleCreated && !this.IsDisposed)
+            if (closing)
             {
-                try
-                {
-                    this.BeginInvoke(new Action(() =>
-                    {
-                        var old = cameraBox.Image;
-                        cameraBox.Image = frame;
-                        old?.Dispose();
-                    }));
-                }
-                catch
-                {
-                    frame.Dispose();
-                }
+                return;
             }
-            else
+
+            try
+            {
+                ShowPreview((Bitmap)eventArgs.Frame.Clone());
+            }
+            catch
+            {
+                return;
+            }
+
+            long nowTicks = DateTime.UtcNow.Ticks;
+            if (nowTicks < Interlocked.Read(ref nextDecodeTicks))
+            {
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref processing, 1, 0) != 0)
+            {
+                return;
+            }
+
+            Interlocked.Exchange(ref nextDecodeTicks, nowTicks + MinimumDecodeInterval.Ticks);
+
+            try
+            {
+                var decodeBitmap = (Bitmap)eventArgs.Frame.Clone();
+                Task.Run(() => DecodeFrame(decodeBitmap));
+            }
+            catch
+            {
+                ReleaseProcessing();
+            }
+        }
+
+        private void ShowPreview(Bitmap frame)
+        {
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    if (closing || IsDisposed)
+                    {
+                        frame.Dispose();
+                        return;
+                    }
+
+                    var oldFrame = cameraBox.Image;
+                    cameraBox.Image = frame;
+                    if (oldFrame != null)
+                    {
+                        oldFrame.Dispose();
+                    }
+                }));
+            }
+            catch
             {
                 frame.Dispose();
             }
+        }
 
-            lock (this)
+        private void DecodeFrame(Bitmap decodeBitmap)
+        {
+            string rawCode = null;
+
+            try
             {
-                if (processing)
+                var reader = new BarcodeReader
                 {
-                    decodeBitmap.Dispose();
-                    return;
+                    AutoRotate = true,
+                    Options = { TryHarder = true }
+                };
+
+                var result = reader.Decode(decodeBitmap);
+                if (result != null
+                    && ScanCodeValidator.IsValid(result.Text)
+                    && !WasRecentlyScanned(result.Text))
+                {
+                    rawCode = result.Text;
                 }
-                processing = true;
+            }
+            catch
+            {
+                // A bad frame should not stop future scans.
+            }
+            finally
+            {
+                decodeBitmap.Dispose();
             }
 
-            Task.Run(async () =>
+            if (rawCode == null || closing)
             {
+                ReleaseProcessing();
+                return;
+            }
+
+            try
+            {
+                BeginInvoke(new Action(() => ProcessScan(rawCode)));
+            }
+            catch
+            {
+                ReleaseProcessing();
+            }
+        }
+
+        private async void ProcessScan(string rawCode)
+        {
+            try
+            {
+                if (closing)
+                {
+                    return;
+                }
+
+                lblStatus.Text = "Confirming attendance...";
+
                 try
                 {
-                    var reader = new BarcodeReader
+                    await AttendanceApiClient.LogAttendanceAsync(rawCode);
+                }
+                catch
+                {
+                    if (!closing)
                     {
-                        AutoRotate = true,
-                        Options = { TryHarder = true }
-                    };
-
-                    var result = reader.Decode(decodeBitmap);
-
-                    if (result != null && result.Text.Length == 10)
-                    {
-                        if (lastScan.ContainsKey(result.Text))
-                        {
-                            if ((DateTime.Now - lastScan[result.Text]).TotalSeconds < 10)
-                            {
-                                processing = false;
-                                return;
-                            }
-                        }
-
-                        lastScan[result.Text] = DateTime.Now;
-
-                        this.BeginInvoke(new Action(async () =>
-                        {
-                            lblStatus.Text = "Scanned: " + result.Text;
-                            txtTime.Text = DateTime.Now.ToString("hh:mm:ss tt");
-
-                            await SendScan(result.Text);
-                            await LoadAttendance();
-
-                            System.Media.SystemSounds.Beep.Play();
-
-                            await Task.Delay(2000);
-                            processing = false;
-                        }));
+                        lblStatus.Text = "Attendance was not recorded. Please scan again.";
                     }
-                    else
+
+                    return;
+                }
+
+                if (closing)
+                {
+                    return;
+                }
+
+                RememberSuccessfulScan(rawCode);
+                txtTime.Text = DateTime.Now.ToString("hh:mm:ss tt");
+                System.Media.SystemSounds.Beep.Play();
+
+                try
+                {
+                    await LoadAttendance();
+
+                    if (!closing)
                     {
-                        processing = false;
+                        lblStatus.Text = "Attendance recorded";
                     }
                 }
                 catch
                 {
-                    processing = false;
+                    if (!closing)
+                    {
+                        lblStatus.Text = "Attendance recorded, but the list could not refresh";
+                    }
                 }
-                finally
+            }
+            finally
+            {
+                ReleaseProcessing();
+            }
+        }
+
+        private async Task LoadAttendance()
+        {
+            gridAttendance.DataSource = await AttendanceApiClient.GetTodayAsync();
+        }
+
+        private bool WasRecentlyScanned(string rawCode)
+        {
+            DateTime now = DateTime.UtcNow;
+            DateTime cutoff = now - DuplicateScanWindow;
+            var staleCodes = new List<string>();
+
+            foreach (var scan in lastSuccessfulScans)
+            {
+                if (scan.Value <= cutoff)
                 {
-                    decodeBitmap.Dispose();
+                    staleCodes.Add(scan.Key);
                 }
-            });
+            }
+
+            foreach (string staleCode in staleCodes)
+            {
+                lastSuccessfulScans.Remove(staleCode);
+            }
+
+            DateTime lastScan;
+            return lastSuccessfulScans.TryGetValue(rawCode, out lastScan)
+                && now - lastScan < DuplicateScanWindow;
         }
 
-        async Task SendScan(string rawCode)
+        private void RememberSuccessfulScan(string rawCode)
         {
-            try
-            {
-                var content = new StringContent(
-                    JsonConvert.SerializeObject(new { raw_code = rawCode }),
-                    Encoding.UTF8,
-                    "application/json"
-                );
-
-                await client.PostAsync(
-                    $"{supabaseUrl}/rest/v1/rpc/log_attendance",
-                    content
-                );
-            }
-            catch
-            {
-                lblStatus.Text = "Network error";
-            }
+            lastSuccessfulScans[rawCode] = DateTime.UtcNow;
         }
 
-        async Task LoadAttendance()
+        private void StopCamera()
         {
-            try
-            {
-                var response = await client.GetStringAsync(
-                    $"{supabaseUrl}/rest/v1/attendance_today_view"
-                );
+            var activeCamera = camera;
+            camera = null;
 
-                var data = JsonConvert.DeserializeObject<List<Attendance>>(response);
-
-                gridAttendance.DataSource = data;
-                gridAttendance.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-            }
-            catch
+            if (activeCamera != null)
             {
-                lblStatus.Text = "Failed to load attendance";
+                activeCamera.NewFrame -= Camera_NewFrame;
+
+                try
+                {
+                    if (activeCamera.IsRunning)
+                    {
+                        activeCamera.SignalToStop();
+                        activeCamera.WaitForStop();
+                    }
+                }
+                catch
+                {
+                    // Camera drivers can disappear while the application is shutting down.
+                }
             }
+
+            btnStart.Enabled = true;
+            btnEnd.Enabled = false;
+        }
+
+        private void ConfigureAttendanceGrid()
+        {
+            gridAttendance.AllowUserToAddRows = false;
+            gridAttendance.AllowUserToDeleteRows = false;
+            gridAttendance.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+            gridAttendance.ReadOnly = true;
+        }
+
+        private void ReleaseProcessing()
+        {
+            Interlocked.Exchange(ref processing, 0);
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (camera != null)
+            closing = true;
+            StopCamera();
+
+            var oldFrame = cameraBox.Image;
+            cameraBox.Image = null;
+            if (oldFrame != null)
             {
-                camera.NewFrame -= Camera_NewFrame;
-
-                if (camera.IsRunning)
-                {
-                    camera.SignalToStop();
-                    camera.WaitForStop();
-                }
-
-                camera = null;
+                oldFrame.Dispose();
             }
 
             base.OnFormClosing(e);
         }
-
-        private void Camera_Attendace_FormClosing(object sender, FormClosingEventArgs e)
-        {
-            Menu menu = new Menu();
-            menu.Show();
-        }
-    }
-
-    public class Attendance
-    {
-        public string first_name { get; set; }
-        public string last_name { get; set; }
-        public DateTime? time_in { get; set; }
-        public DateTime? time_out { get; set; }
     }
 }

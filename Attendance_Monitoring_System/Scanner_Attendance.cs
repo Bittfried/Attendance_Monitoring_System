@@ -1,8 +1,4 @@
-﻿using Newtonsoft.Json;
 using System;
-using System.Collections.Generic;
-using System.Net.Http;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -10,109 +6,128 @@ namespace Attendance_Monitoring_System
 {
     public partial class Scanner_Attendance : Form
     {
-        string supabaseUrl = "https://klydsxazcmxavgqvxrjv.supabase.co";
-        string supabaseKey = "sb_publishable_By0K2pvbnVBRQ8tp_Ny-dg_qCExPABw";
-
-        private static readonly HttpClient client = new HttpClient();
+        private bool processing;
+        private bool closing;
 
         public Scanner_Attendance()
         {
             InitializeComponent();
-
-            if (!client.DefaultRequestHeaders.Contains("apikey"))
-                client.DefaultRequestHeaders.Add("apikey", supabaseKey);
-
-            if (!client.DefaultRequestHeaders.Contains("Authorization"))
-                client.DefaultRequestHeaders.Add("Authorization", $"Bearer {supabaseKey}");
-
-            this.Load += Form1_Load;
-
-            txtScan.Focus();
+            ConfigureAttendanceGrid();
         }
 
         private async void txtScan_KeyDown(object sender, KeyEventArgs e)
         {
-            if (e.KeyCode != Keys.Enter)
+            if (e.KeyCode != Keys.Enter || processing)
+            {
                 return;
+            }
 
             e.SuppressKeyPress = true;
 
             string rawCode = txtScan.Text.Trim();
 
-            txtTime.Text = DateTime.Now.ToString("hh:mm:ss tt");
-
-            if (rawCode.Length != 10)
+            if (!ScanCodeValidator.IsValid(rawCode))
             {
-                MessageBox.Show("Warning: scanned code is wrong", "Input Rejected");
+                MessageBox.Show(
+                    "The scanned code must contain exactly 10 letters or digits.",
+                    "Input Rejected");
                 txtScan.Clear();
                 txtScan.Focus();
                 return;
             }
 
+            processing = true;
+            txtScan.Enabled = false;
+
             try
             {
-                await SendScan(rawCode);
-                await LoadAttendance();
-            }
-            catch
-            {
-                MessageBox.Show("Network error while sending attendance.");
-            }
+                try
+                {
+                    await AttendanceApiClient.LogAttendanceAsync(rawCode);
+                }
+                catch
+                {
+                    if (!closing)
+                    {
+                        MessageBox.Show(
+                            "Attendance was not confirmed by the server. Please scan again.",
+                            "Attendance Not Recorded");
+                    }
 
-            txtTime.Clear();
-            txtScan.Clear();
-            txtScan.Focus();
+                    return;
+                }
+
+                if (closing)
+                {
+                    return;
+                }
+
+                txtTime.Text = DateTime.Now.ToString("hh:mm:ss tt");
+
+                try
+                {
+                    await LoadAttendance();
+                }
+                catch
+                {
+                    if (!closing)
+                    {
+                        MessageBox.Show(
+                            "Attendance was recorded, but the list could not refresh.",
+                            "Refresh Failed");
+                    }
+                }
+            }
+            finally
+            {
+                processing = false;
+
+                if (!closing && !IsDisposed)
+                {
+                    txtScan.Enabled = true;
+                    txtScan.Clear();
+                    txtScan.Focus();
+                }
+            }
         }
 
-        async Task SendScan(string rawCode)
+        private async Task LoadAttendance()
         {
-            var content = new StringContent(
-                JsonConvert.SerializeObject(new { raw_code = rawCode }),
-                Encoding.UTF8,
-                "application/json"
-            );
-
-            var response = await client.PostAsync(
-                $"{supabaseUrl}/rest/v1/rpc/log_attendance",
-                content
-            );
-
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new Exception("Failed to log attendance.");
-            }
-        }
-
-        async Task LoadAttendance()
-        {
-            try
-            {
-                var response = await client.GetStringAsync(
-                    $"{supabaseUrl}/rest/v1/attendance_today_view"
-                );
-
-                var data = JsonConvert.DeserializeObject<List<Attendance>>(response);
-
-                gridAttendance.DataSource = data;
-                gridAttendance.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-            }
-            catch
-            {
-                MessageBox.Show("Failed to load attendance.");
-            }
+            gridAttendance.DataSource = await AttendanceApiClient.GetTodayAsync();
         }
 
         private async void Form1_Load(object sender, EventArgs e)
         {
-            await LoadAttendance();
+            try
+            {
+                await LoadAttendance();
+            }
+            catch
+            {
+                if (!closing)
+                {
+                    MessageBox.Show("Failed to load attendance.", "Network Error");
+                }
+            }
+
+            if (!closing)
+            {
+                txtScan.Focus();
+            }
         }
 
-        private void Scanner_Attendance_FormClosing(object sender, FormClosingEventArgs e)
+        private void ConfigureAttendanceGrid()
         {
-            Menu menu = new Menu();
-            menu.Show();
+            gridAttendance.AllowUserToAddRows = false;
+            gridAttendance.AllowUserToDeleteRows = false;
+            gridAttendance.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+            gridAttendance.ReadOnly = true;
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            closing = true;
+            base.OnFormClosing(e);
         }
     }
-
-
 }

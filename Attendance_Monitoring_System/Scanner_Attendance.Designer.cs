@@ -57,7 +57,6 @@
             // 
             // txtScan
             // 
-            this.txtScan.Enabled = false;
             this.txtScan.Location = new System.Drawing.Point(463, 84);
             this.txtScan.Name = "txtScan";
             this.txtScan.Size = new System.Drawing.Size(252, 20);
@@ -106,7 +105,6 @@
             this.Name = "Scanner_Attendance";
             this.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
             this.Text = "Barcode Attendance";
-            this.FormClosing += new System.Windows.Forms.FormClosingEventHandler(this.Scanner_Attendance_FormClosing);
             this.Load += new System.EventHandler(this.Form1_Load);
             ((System.ComponentModel.ISupportInitialize)(this.gridAttendance)).EndInit();
             this.ResumeLayout(false);
